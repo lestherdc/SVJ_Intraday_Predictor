@@ -6,22 +6,79 @@ import matplotlib.pyplot as plt
 # Configuración
 SYMBOL = "TSLA"  # Cambia a "AAPL" o "PLTR" si quieres
 INTERVAL = "15m"
-PERIOD = "60d"  # Máximo para intradía en yfinance
-NUM_PATHS = 10000  # Número de simulaciones Monte Carlo
-HORIZON_HOURS = 1  # Predicción para próxima hora
-STEPS_PER_HOUR = 4  # 15min steps (60/15 = 4)
+PERIOD = "60d"
+NUM_PATHS = 10000
+HORIZON_HOURS = 1
+STEPS_PER_HOUR = 4
+
+
+# Función RSI manual ultra-robusta
+def calculate_rsi(prices, period=14):
+    prices = np.array(prices, dtype=float)
+    n = len(prices)
+
+    rsi = np.full(n, 50.0)
+
+    if n <= period:
+        return rsi
+
+    deltas = np.diff(prices)
+    if len(deltas) == 0:
+        return rsi
+
+    seed = deltas[:period]
+    if seed.size == 0:
+        return rsi
+
+    gains = np.maximum(seed, 0)
+    losses = np.abs(np.minimum(seed, 0))
+
+    avg_gain = np.mean(gains) if gains.size > 0 else 0.0
+    avg_loss = np.mean(losses) if losses.size > 0 else 1e-10
+
+    if avg_loss > 0:
+        rs = avg_gain / avg_loss
+        rsi[period] = 100. - 100. / (1. + rs)
+
+    for i in range(period + 1, n):
+        delta = deltas[i - 1]
+        gain = max(delta, 0)
+        loss = max(-delta, 0)
+
+        avg_gain = (avg_gain * (period - 1) + gain) / period
+        avg_loss = (avg_loss * (period - 1) + loss) / period
+
+        if avg_loss > 0:
+            rs = avg_gain / avg_loss
+            rsi[i] = 100. - 100. / (1. + rs)
+
+    return rsi
+
 
 # Descargar datos
 print(f"Descargando {SYMBOL} en {INTERVAL}...")
 df = yf.download(SYMBOL, interval=INTERVAL, period=PERIOD, progress=False)
 
 if df.empty:
-    print("Error: No se descargaron datos. Verifica conexión o símbolo.")
+    print("Error: No se descargaron datos.")
     exit()
 
-# Extraer como arrays NumPy con dtype explícito float64
+# Extraer como array NumPy float (más seguro para cálculos)
 closes = df['Close'].values.astype(np.float64)
 volumes = df['Volume'].values.astype(np.float64)
+
+# Calcular RSI manual
+rsi_values = calculate_rsi(closes)
+
+# Normalizar RSI
+normalized_rsi = (rsi_values - 50) / 50
+
+# Alinear con log_returns (quita los primeros 14 si es necesario)
+if len(normalized_rsi) > len(closes) - 1:
+    normalized_rsi = normalized_rsi[:len(closes) - 1]
+else:
+    pad_length = len(closes) - 1 - len(normalized_rsi)
+    normalized_rsi = np.pad(normalized_rsi, (pad_length, 0), mode='edge')
 
 # Normalizar volumen
 if len(volumes) > 100:
@@ -33,12 +90,11 @@ else:
 
 normalized_vol = (volumes - vol_mean) / (vol_std + 1e-8)
 
-# Imprimir último precio usando .item() para extraer escalar seguro
 print(f"Datos obtenidos: {len(closes)} velas")
-print(f"Último precio: ${closes[-1].item():.2f}")
+print(f"Último precio: ${closes[-1].item():.2f}")  # FIX definitivo: .item()
 
 
-# Función para simular paths SVJ
+# Función simulación SVJ
 def simulate_svj(params, S0, v0, T, dt, n_paths):
     mu, kappa, theta, xi, rho, lambda_j, mu_j, sigma_j = params
     n_steps = int(T / dt)
@@ -56,8 +112,8 @@ def simulate_svj(params, S0, v0, T, dt, n_paths):
     return paths
 
 
-# Función de likelihood con penalización por volumen
-def svj_log_likelihood(params, returns, dt, norm_vol):
+# Likelihood con volumen + RSI
+def svj_log_likelihood(params, returns, dt, norm_vol, norm_rsi):
     mu, kappa, theta, xi, rho, lambda_j, mu_j, sigma_j = params
 
     mean_ret = np.mean(returns)
@@ -75,23 +131,27 @@ def svj_log_likelihood(params, returns, dt, norm_vol):
     vol_divergence = np.mean(np.abs(norm_vol[-len(returns):]))
     volume_penalty = vol_divergence * 0.5
 
+    rsi_extreme = np.mean(np.abs(norm_rsi[-len(returns):]))
+    rsi_penalty = rsi_extreme * 0.4
+
     loss = ((mean_ret - expected_mean) ** 2 + (var_ret - expected_var) ** 2 +
-            (skew_ret - expected_skew) ** 2 + (kurt_ret - expected_kurt) ** 2 + volume_penalty)
+            (skew_ret - expected_skew) ** 2 + (kurt_ret - expected_kurt) ** 2 +
+            volume_penalty + rsi_penalty)
 
     return loss
 
 
 # Preparar returns y dt
 log_returns = np.log(closes[1:] / closes[:-1])
-dt = 15 / (60 * 390)  # 15 min como fracción de trading day
+dt = 15 / (60 * 390)
 
 # Parámetros iniciales
 initial_params = [0.0, 2.0, 0.04, 0.3, -0.5, 0.5, -0.03, 0.1]
 
 # Calibración
-print("Calibrando parámetros SVJ con volumen...")
+print("Calibrando SVJ con volumen y RSI...")
 result = minimize(svj_log_likelihood, initial_params,
-                  args=(log_returns, dt, normalized_vol),
+                  args=(log_returns, dt, normalized_vol, normalized_rsi),
                   method='Nelder-Mead',
                   bounds=[(-1, 1), (0.1, 10), (0.01, 0.2), (0.01, 1), (-1, 1), (0.01, 2), (-0.5, 0.5), (0.01, 0.5)])
 
@@ -127,7 +187,7 @@ print(f"90% Intervalo de confianza: [${ci_90_low:.2f}, ${ci_90_high:.2f}]")
 plt.figure(figsize=(10, 6))
 plt.plot(paths[:100].T, alpha=0.6, linewidth=0.8)
 plt.axhline(S0, color='red', linestyle='--', label=f'Precio actual: ${S0.item():.2f}')
-plt.title(f'SVJ + Volumen: {NUM_PATHS} paths - Próxima hora ({SYMBOL})')
+plt.title(f'SVJ + Volumen + RSI manual: {NUM_PATHS} paths - Próxima hora ({SYMBOL})')
 plt.xlabel('Pasos (15 min)')
 plt.ylabel('Precio')
 plt.legend()
