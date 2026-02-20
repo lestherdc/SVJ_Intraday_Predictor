@@ -4,7 +4,7 @@ from scipy.optimize import minimize
 import matplotlib.pyplot as plt
 
 # Configuración
-SYMBOL = "TSLA"  # Cambia a "AAPL" o "PLTR" si quieres
+SYMBOL = "PLTR"  # Cambia a "AAPL" o "PLTR" si quieres
 INTERVAL = "15m"
 PERIOD = "60d"
 NUM_PATHS = 10000
