@@ -226,3 +226,105 @@ plt.ylabel('Precio')
 plt.legend()
 plt.grid(True, alpha=0.3)
 plt.show()
+
+# ======================
+# BACKTEST SIMPLE PARA COMPARAR MÉTODOS
+# ======================
+print("\n=== BACKTEST: Comparación Nelder-Mead vs L-BFGS-B ===")
+
+# Parámetros del backtest
+BACKTEST_DAYS = 30  # días hacia atrás para testear
+WINDOW_SIZE = 500  # velas para calibrar en cada paso (rolling)
+STEP_SIZE = 4  # cada 4 velas de 15min = 1 hora
+
+# Cortar datos históricos (últimos BACKTEST_DAYS días aprox)
+total_velas = len(closes)
+velas_por_dia = 26  # aprox 6.5h * 4 velas/h
+start_idx = max(0, total_velas - BACKTEST_DAYS * velas_por_dia - WINDOW_SIZE)
+
+closes_bt = closes[start_idx:]
+volumes_bt = volumes[start_idx:]
+rsi_bt = calculate_rsi(closes_bt)
+normalized_rsi_bt = (rsi_bt - 50) / 50
+normalized_rsi_bt = normalized_rsi_bt[14:]  # alinear
+normalized_rsi_bt = normalized_rsi_bt[-len(closes_bt) + 1:]
+
+volumes_array_bt = np.array(volumes_bt)
+normalized_vol_bt = (volumes_array_bt - np.mean(volumes_array_bt[-100:])) / (np.std(volumes_array_bt[-100:]) + 1e-8)
+
+print(f"Backtest en {len(closes_bt)} velas (~{BACKTEST_DAYS} días)")
+
+# Métodos a probar
+methods = ['Nelder-Mead', 'L-BFGS-B']
+
+for method in methods:
+    print(f"\n--- Backtest con {method} ---")
+
+    correct_direction = 0
+    total_predictions = 0
+    coverage_count = 0
+
+    losses = []
+
+    # Empezar desde WINDOW_SIZE para tener datos de calibración
+    for i in range(WINDOW_SIZE, len(closes_bt) - STEP_SIZE, STEP_SIZE):
+        # Ventana de calibración
+        window_closes = closes_bt[i - WINDOW_SIZE:i]
+        window_log_returns = np.log(window_closes[1:] / window_closes[:-1])
+        window_norm_vol = normalized_vol_bt[i - WINDOW_SIZE:i]
+        window_norm_rsi = normalized_rsi_bt[i - WINDOW_SIZE:i]
+        window_norm_vix = normalized_vix[i - WINDOW_SIZE:i]  # si tienes VIX
+
+        # Calibrar
+        result = minimize(svj_log_likelihood, initial_params,
+                          args=(window_log_returns, dt, window_norm_vol, window_norm_rsi, window_norm_vix),
+                          method=method,
+                          bounds=[(-1, 1), (0.1, 10), (0.01, 0.2), (0.01, 1), (-1, 1), (0.01, 2), (-0.5, 0.5),
+                                  (0.01, 0.5)])
+
+        if not result.success:
+            continue  # skip si no converge
+
+        params = result.x
+        losses.append(result.fun)
+
+        # Precio actual (inicio de la predicción)
+        S0_bt = closes_bt[i]
+
+        # Simular próxima hora
+        v0_bt = np.var(window_log_returns[-100:]) if len(window_log_returns) > 100 else 0.04
+        T_bt = 1 / 6.5
+        dt_sim_bt = T_bt / STEPS_PER_HOUR
+
+        paths_bt = simulate_svj(params, S0_bt, v0_bt, T_bt, dt_sim_bt, NUM_PATHS)
+        final_prices_bt = paths_bt[:, -1]
+
+        p_up_bt = np.mean(final_prices_bt > S0_bt)
+        mean_pred_bt = np.mean(final_prices_bt)
+        ci_90_low_bt = np.percentile(final_prices_bt, 5)
+        ci_90_high_bt = np.percentile(final_prices_bt, 95)
+
+        # Precio real 1 hora después (4 velas después)
+        real_future_price = closes_bt[i + STEP_SIZE] if i + STEP_SIZE < len(closes_bt) else None
+
+        if real_future_price is not None:
+            total_predictions += 1
+            # Dirección correcta?
+            if (p_up_bt > 0.5 and real_future_price > S0_bt) or (p_up_bt <= 0.5 and real_future_price <= S0_bt):
+                correct_direction += 1
+
+            # Coverage CI 90%
+            if ci_90_low_bt <= real_future_price <= ci_90_high_bt:
+                coverage_count += 1
+
+    if total_predictions > 0:
+        accuracy = correct_direction / total_predictions
+        coverage = coverage_count / total_predictions
+        avg_loss = np.mean(losses) if losses else 0
+
+        print(f"Total predicciones válidas: {total_predictions}")
+        print(f"Accuracy en dirección (P>50% = subida real): {accuracy:.2%}")
+        print(f"Coverage CI 90%: {coverage:.2%} (ideal ~90%)")
+        print(f"Loss promedio: {avg_loss:.4f}")
+    else:
+        print("No hubo suficientes datos para backtest.")
