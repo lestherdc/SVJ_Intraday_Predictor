@@ -7,7 +7,7 @@ import matplotlib.pyplot as plt
 SYMBOL = "TSLA"  # Cambia a "AAPL" o "PLTR" si quieres
 INTERVAL = "15m"
 PERIOD = "60d"
-NUM_PATHS = 10000
+NUM_PATHS = 100000  # Dependiendo de la pc, podriamos llegar a 100000, aumenta la  precision (variaciones pequenas)
 HORIZON_HOURS = 1
 STEPS_PER_HOUR = 4
 
@@ -63,6 +63,19 @@ if df.empty:
     print("Error: No se descargaron datos.")
     exit()
 
+# Descargar VIX en mismo timeframe
+print("Descargando VIX...")
+vix_df = yf.download("^VIX", interval=INTERVAL, period=PERIOD, progress=False)
+if vix_df.empty:
+    print("Advertencia: No se descargó VIX. Continuando sin VIX.")
+    vix_closes = np.full(len(df), 20.0)  # valor neutral si falla
+else:
+    vix_closes = vix_df['Close'].values.astype(np.float64)
+    # Alinear longitud (VIX puede tener menos datos)
+    if len(vix_closes) < len(df):
+        vix_closes = np.pad(vix_closes, (len(df) - len(vix_closes), 0), mode='edge')
+
+
 # Extraer como array NumPy float64 (más seguro para cálculos)
 closes = df['Close'].values.astype(np.float64)
 volumes = df['Volume'].values.astype(np.float64)
@@ -90,6 +103,12 @@ else:
 
 normalized_vol = (volumes - vol_mean) / (vol_std + 1e-8)
 
+# Normalizar VIX
+vix_mean = np.mean(vix_closes[-100:]) if len(vix_closes) > 100 else np.mean(vix_closes)
+vix_std = np.std(vix_closes[-100:]) if len(vix_closes) > 100 else np.std(vix_closes)
+normalized_vix = (vix_closes - vix_mean) / (vix_std + 1e-8)
+normalized_vix = normalized_vix[-len(closes)+1:]  # alinear con log_returns
+
 # Imprimir último precio usando .item() (solución definitiva)
 print(f"Datos obtenidos: {len(closes)} velas")
 print(f"Último precio: ${closes[-1].item():.2f}")
@@ -113,8 +132,8 @@ def simulate_svj(params, S0, v0, T, dt, n_paths):
     return paths
 
 
-# Likelihood con volumen + RSI
-def svj_log_likelihood(params, returns, dt, norm_vol, norm_rsi):
+# Likelihood con volumen + RSI + VIX
+def svj_log_likelihood(params, returns, dt, norm_vol, norm_rsi, norm_vix):
     mu, kappa, theta, xi, rho, lambda_j, mu_j, sigma_j = params
 
     mean_ret = np.mean(returns)
@@ -135,9 +154,13 @@ def svj_log_likelihood(params, returns, dt, norm_vol, norm_rsi):
     rsi_extreme = np.mean(np.abs(norm_rsi[-len(returns):]))
     rsi_penalty = rsi_extreme * 0.4
 
+    # Nueva penalización por VIX
+    vix_divergence = np.mean(np.abs(norm_vix[-len(returns):]))
+    vix_penalty = vix_divergence * 0.2  # peso ajustable (prueba 0.2–0.5)
+
     loss = ((mean_ret - expected_mean) ** 2 + (var_ret - expected_var) ** 2 +
             (skew_ret - expected_skew) ** 2 + (kurt_ret - expected_kurt) ** 2 +
-            volume_penalty + rsi_penalty)
+            volume_penalty + rsi_penalty + vix_penalty)
 
     return loss
 
@@ -149,11 +172,11 @@ dt = 15 / (60 * 390)
 # Parámetros iniciales
 initial_params = [0.0, 2.0, 0.04, 0.3, -0.5, 0.5, -0.03, 0.1]
 
-# Calibración
-print("Calibrando SVJ con volumen y RSI...")
+# Calibración con columen + RSI + VIX
+print("Calibrando SVJ con volumen, RSI y VIX")
 result = minimize(svj_log_likelihood, initial_params,
-                  args=(log_returns, dt, normalized_vol, normalized_rsi),
-                  method='Nelder-Mead',
+                  args=(log_returns, dt, normalized_vol, normalized_rsi, normalized_vix),
+                  method='L-BFGS-B',
                   bounds=[(-1, 1), (0.1, 10), (0.01, 0.2), (0.01, 1), (-1, 1), (0.01, 2), (-0.5, 0.5), (0.01, 0.5)])
 
 calibrated_params = result.x
@@ -196,7 +219,7 @@ print(f"90% Intervalo de confianza: [${ci_90_low:.2f}, ${ci_90_high:.2f}]")
 plt.figure(figsize=(10, 6))
 plt.plot(paths[:100].T, alpha=0.6, linewidth=0.8)
 plt.axhline(S0, color='red', linestyle='--', label=f'Precio actual: ${S0.item():.2f}')  # FIX aquí
-plt.title(f'SVJ + Volumen + RSI: {NUM_PATHS} paths - Próximas {HORIZON_HOURS} horas ({SYMBOL})')
+plt.title(f'SVJ + Volumen + RSI + VIX: {NUM_PATHS} paths - Próximas {HORIZON_HOURS} horas ({SYMBOL})')
 plt.xlabel('Pasos (15 min)')
 plt.ylabel('Precio')
 plt.legend()
