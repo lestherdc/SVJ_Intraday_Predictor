@@ -7,6 +7,7 @@ import matplotlib.pyplot as plt
 SYMBOL = "TSLA"  # Cambia a "AAPL" o "PLTR" si quieres
 INTERVAL = "15m"
 PERIOD = "60d"
+OPTIMIZER_METHOD = "L-BFGS-B" # L-BFGS-B o Nelder-Mead
 NUM_PATHS = 100000  # Dependiendo de la pc, podriamos llegar a 100000, aumenta la  precision (variaciones pequenas)
 HORIZON_HOURS = 1
 STEPS_PER_HOUR = 4
@@ -172,11 +173,11 @@ dt = 15 / (60 * 390)
 # Parámetros iniciales
 initial_params = [0.0, 2.0, 0.04, 0.3, -0.5, 0.5, -0.03, 0.1]
 
-# Calibración con columen + RSI + VIX
+# Calibración con columen + RSI + VIX  metodos 'Nelder-Mead o L-BFGS-B'
 print("Calibrando SVJ con volumen, RSI y VIX")
 result = minimize(svj_log_likelihood, initial_params,
                   args=(log_returns, dt, normalized_vol, normalized_rsi, normalized_vix),
-                  method='L-BFGS-B',
+                  method=OPTIMIZER_METHOD,
                   bounds=[(-1, 1), (0.1, 10), (0.01, 0.2), (0.01, 1), (-1, 1), (0.01, 2), (-0.5, 0.5), (0.01, 0.5)])
 
 calibrated_params = result.x
