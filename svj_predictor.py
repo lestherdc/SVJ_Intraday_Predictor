@@ -15,13 +15,11 @@ HORIZON_HOURS = 1
 STEPS_PER_HOUR = 4
 
 # Configuración real-time
-REFIT_INTERVAL_MIN = 15
-SHOW_EVERY_REFIT = True
+REFIT_INTERVAL_MIN = 15  # recalibra cada 15 min
+SHOW_EVERY_REFIT = True  # Muestra predicciones cada vez
 
-# dt definido al inicio (frase de día para 15 min)
-dt = 15 / (60 * 390)
-
-# Parámetros iniciales definidos al inicio
+# dt e initial_params definidos al inicio
+dt = 15 / (60 * 390)  # fracción de día para 15 min
 initial_params = [0.0, 2.0, 0.04, 0.3, -0.5, 0.5, -0.03, 0.1]
 
 # Función RSI manual robusta
@@ -213,6 +211,18 @@ try:
             print(f"Precio medio esperado: ${mean_pred:.2f}")
             print(f"Probabilidad de estar dentro de ±1% del precio medio esperado: {p_near_mean:.2%}")
             print(f"90% Intervalo de confianza: [${ci_90_low:.2f}, ${ci_90_high:.2f}]")
+
+            # Gráfico actualizado cada recalibración
+            plt.figure(figsize=(10,6))
+            plt.plot(paths[:100].T, alpha=0.6, linewidth=0.8)
+            plt.axhline(S0, color='red', linestyle='--', label=f'Precio actual: ${S0.item():.2f}')
+            plt.title(f'SVJ + Volumen + RSI + VIX ({current_time}) - Próximas {HORIZON_HOURS} horas ({SYMBOL})')
+            plt.xlabel('Pasos (15 min)')
+            plt.ylabel('Precio')
+            plt.legend()
+            plt.grid(True, alpha=0.3)
+            plt.show()
+            plt.close()  # Cierra la ventana para no acumular gráficos
         else:
             print("No se pudo recalibrar. Usando parámetros anteriores.")
 
