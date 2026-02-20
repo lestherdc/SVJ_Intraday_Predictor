@@ -178,10 +178,18 @@ mean_pred = np.mean(final_prices)
 ci_90_low = np.percentile(final_prices, 5)
 ci_90_high = np.percentile(final_prices, 95)
 
+# Probabilidad de estar dentro de ±1% del precio medio esperado
+mean_price = mean_pred
+lower_bound = mean_price * 0.99
+upper_bound = mean_price * 1.01
+p_near_mean = np.mean((final_prices >= lower_bound) & (final_prices <= upper_bound))
+
+
 print(f"\nPredicciones para próximas {HORIZON_HOURS} horas ({SYMBOL}):")
 print(f"P(subida): {p_up:.2%}")
 print(f"P(subida >1%): {p_up_1pct:.2%}")
 print(f"Precio medio esperado: ${mean_pred:.2f}")
+print(f"Probabilidad de estar dentro de ±1% del precio medio esperado: {p_near_mean:.2%}")
 print(f"90% Intervalo de confianza: [${ci_90_low:.2f}, ${ci_90_high:.2f}]")
 
 # Gráfico
