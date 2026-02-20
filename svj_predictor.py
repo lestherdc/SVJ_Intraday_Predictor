@@ -4,7 +4,7 @@ from scipy.optimize import minimize
 import matplotlib.pyplot as plt
 
 # Configuración
-SYMBOL = "PLTR"  # Cambia a "AAPL" o "PLTR" si quieres
+SYMBOL = "TSLA"  # Cambia a "AAPL" o "PLTR" si quieres
 INTERVAL = "15m"
 PERIOD = "60d"
 NUM_PATHS = 10000
@@ -12,7 +12,7 @@ HORIZON_HOURS = 1
 STEPS_PER_HOUR = 4
 
 
-# Función RSI manual ultra-robusta
+# Función para calcular RSI manualmente (robusta)
 def calculate_rsi(prices, period=14):
     prices = np.array(prices, dtype=float)
     n = len(prices)
@@ -63,7 +63,7 @@ if df.empty:
     print("Error: No se descargaron datos.")
     exit()
 
-# Extraer como array NumPy float (más seguro para cálculos)
+# Extraer como array NumPy float64 (más seguro para cálculos)
 closes = df['Close'].values.astype(np.float64)
 volumes = df['Volume'].values.astype(np.float64)
 
@@ -73,7 +73,7 @@ rsi_values = calculate_rsi(closes)
 # Normalizar RSI
 normalized_rsi = (rsi_values - 50) / 50
 
-# Alinear con log_returns (quita los primeros 14 si es necesario)
+# Alinear longitud
 if len(normalized_rsi) > len(closes) - 1:
     normalized_rsi = normalized_rsi[:len(closes) - 1]
 else:
@@ -90,8 +90,9 @@ else:
 
 normalized_vol = (volumes - vol_mean) / (vol_std + 1e-8)
 
+# Imprimir último precio usando .item() (solución definitiva)
 print(f"Datos obtenidos: {len(closes)} velas")
-print(f"Último precio: ${closes[-1].item():.2f}")  # FIX definitivo: .item()
+print(f"Último precio: ${closes[-1].item():.2f}")
 
 
 # Función simulación SVJ
@@ -177,7 +178,7 @@ mean_pred = np.mean(final_prices)
 ci_90_low = np.percentile(final_prices, 5)
 ci_90_high = np.percentile(final_prices, 95)
 
-print(f"\nPredicciones para próxima hora ({SYMBOL}):")
+print(f"\nPredicciones para próximas {HORIZON_HOURS} horas ({SYMBOL}):")
 print(f"P(subida): {p_up:.2%}")
 print(f"P(subida >1%): {p_up_1pct:.2%}")
 print(f"Precio medio esperado: ${mean_pred:.2f}")
@@ -186,8 +187,8 @@ print(f"90% Intervalo de confianza: [${ci_90_low:.2f}, ${ci_90_high:.2f}]")
 # Gráfico
 plt.figure(figsize=(10, 6))
 plt.plot(paths[:100].T, alpha=0.6, linewidth=0.8)
-plt.axhline(S0, color='red', linestyle='--', label=f'Precio actual: ${S0.item():.2f}')
-plt.title(f'SVJ + Volumen + RSI manual: {NUM_PATHS} paths - Próxima hora ({SYMBOL})')
+plt.axhline(S0, color='red', linestyle='--', label=f'Precio actual: ${S0.item():.2f}')  # FIX aquí
+plt.title(f'SVJ + Volumen + RSI: {NUM_PATHS} paths - Próximas {HORIZON_HOURS} horas ({SYMBOL})')
 plt.xlabel('Pasos (15 min)')
 plt.ylabel('Precio')
 plt.legend()
