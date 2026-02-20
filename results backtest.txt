@@ -1,0 +1,15 @@
+=== BACKTEST: Comparación Nelder-Mead vs L-BFGS-B ===
+Backtest en 1280 velas (~30 días)
+
+--- Backtest con Nelder-Mead ---
+Total predicciones válidas: 158
+Accuracy en dirección (P>50% = subida real): 53.16%
+Coverage CI 90%: 89.87% (ideal ~90%)
+Loss promedio: 1.6299
+
+--- Backtest con L-BFGS-B ---
+Total predicciones válidas: 193
+Accuracy en dirección (P>50% = subida real): 54.40%
+Coverage CI 90%: 96.37% (ideal ~90%)
+Loss promedio: 1.6959
+
