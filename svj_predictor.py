@@ -6,7 +6,7 @@ from scipy.optimize import minimize
 import matplotlib.pyplot as plt
 
 # Configuración General
-SYMBOL = "TSLA"  # Cambia a "AAPL" o "PLTR" si quieres
+SYMBOL = "PLTR"  # Cambia a "AAPL" o "PLTR" si quieres
 INTERVAL = "15m"
 PERIOD = "60d"
 OPTIMIZER_METHOD = "L-BFGS-B"  # L-BFGS-B o Nelder-Mead

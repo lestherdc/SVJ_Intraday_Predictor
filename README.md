@@ -33,3 +33,5 @@ para eso debemos tenerlo ya descargado
 El metodo anteior y original fue desarrolado usando Nelder_Mead
 en este branch usaremos Calibracion Bayesian, con la intension
 de mejorar la exactitud de nuestro programa.
+
+
