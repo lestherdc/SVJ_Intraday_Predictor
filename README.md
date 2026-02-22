@@ -34,4 +34,17 @@ El metodo anteior y original fue desarrolado usando Nelder_Mead
 en este branch usaremos Calibracion Bayesian, con la intension
 de mejorar la exactitud de nuestro programa.
 
+## Actualizacion, capacidad predictiva
+### optimizador local -> Global
+
+Se implementara Differential Evolution en vez de algoritmo 
+L-BFGS-B.
+
+### Refactorizacion de funcion perdida
+
+Se noto que penalizaciones directas: loss =(...) + volume_penalty + rsi_penalty
+confunde al optimizador al mezclar unidades distintas.
+
+### Deteccion de Regimenes
+Filtro de Kalman o HMM, se agregara una logica de deteccion de cambio de regimen.
 
