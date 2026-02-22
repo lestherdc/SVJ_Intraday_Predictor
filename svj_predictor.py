@@ -2,234 +2,157 @@ import yfinance as yf
 import time
 from datetime import datetime
 import numpy as np
-from scipy.optimize import minimize
+import pandas as pd
+from scipy.optimize import differential_evolution
 import matplotlib.pyplot as plt
 
-# Configuración General
-SYMBOL = "PLTR"  # Cambia a "AAPL" o "PLTR" si quieres
+
+SYMBOL = "PLTR"
+MARKET_REF = "^GSPC"
 INTERVAL = "15m"
 PERIOD = "60d"
-OPTIMIZER_METHOD = "L-BFGS-B"  # L-BFGS-B o Nelder-Mead
-NUM_PATHS = 100000  # Alta precisión
+NUM_PATHS = 30000
 HORIZON_HOURS = 1
-STEPS_PER_HOUR = 4
+WINDOW_SIZE = 400
+REFIT_INTERVAL_MIN = 15
+DT = 15 / (60 * 6.5)
 
-# Configuración real-time
-REFIT_INTERVAL_MIN = 15  # recalibra cada 15 min
-SHOW_EVERY_REFIT = True  # Muestra predicciones cada vez
+# Activar modo interactivo para que los gráficos no bloqueen el loop
+plt.ion()
 
-# dt e initial_params definidos al inicio
-dt = 15 / (60 * 390)  # fracción de día para 15 min
-initial_params = [0.0, 2.0, 0.04, 0.3, -0.5, 0.5, -0.03, 0.1]
 
-# Función RSI manual robusta
+def clean_series(df):
+    """Extrae y limpia la serie de precios detectando el tipo de objeto."""
+    if df is None or (isinstance(df, (pd.DataFrame, pd.Series)) and df.empty):
+        return np.array([])
+
+    # Si es un DataFrame (posible MultiIndex de yfinance)
+    if isinstance(df, pd.DataFrame):
+        return df.iloc[:, 0].dropna().values.flatten().astype(float)
+    # Si ya es una Serie de Pandas
+    if isinstance(df, pd.Series):
+        return df.dropna().values.flatten().astype(float)
+
+    return np.array(df).flatten().astype(float)
+
+
 def calculate_rsi(prices, period=14):
-    prices = np.array(prices, dtype=float)
-    n = len(prices)
-
-    rsi = np.full(n, 50.0)
-
-    if n <= period:
-        return rsi
-
+    if len(prices) < period + 1: return np.full(len(prices), 50.0)
     deltas = np.diff(prices)
-    if len(deltas) == 0:
-        return rsi
+    gains = np.where(deltas > 0, deltas, 0.0)
+    losses = np.where(deltas < 0, -deltas, 0.0)
 
-    seed = deltas[:period]
-    if seed.size == 0:
-        return rsi
+    avg_gain = np.mean(gains[:period])
+    avg_loss = np.mean(losses[:period]) + 1e-10
 
-    gains = np.maximum(seed, 0)
-    losses = np.abs(np.minimum(seed, 0))
-
-    avg_gain = np.mean(gains) if gains.size > 0 else 0.0
-    avg_loss = np.mean(losses) if losses.size > 0 else 1e-10
-
-    if avg_loss > 0:
-        rs = avg_gain / avg_loss
-        rsi[period] = 100. - 100. / (1. + rs)
-
-    for i in range(period + 1, n):
-        delta = deltas[i - 1]
-        gain = max(delta, 0)
-        loss = max(-delta, 0)
-
+    rsi = np.zeros_like(prices)
+    rsi[:period] = 50.0
+    for i in range(period, len(prices)):
+        gain, loss = float(max(deltas[i - 1], 0)), float(max(-deltas[i - 1], 0))
         avg_gain = (avg_gain * (period - 1) + gain) / period
         avg_loss = (avg_loss * (period - 1) + loss) / period
-
-        if avg_loss > 0:
-            rs = avg_gain / avg_loss
-            rsi[i] = 100. - 100. / (1. + rs)
-
+        rsi[i] = 100 - (100 / (1 + (avg_gain / avg_loss)))
     return rsi
 
-# Función simulación SVJ
-def simulate_svj(params, S0, v0, T, dt, n_paths):
+
+def simulate_svj_with_beta(params, S0, v0, beta, market_drift, T, dt, n_paths):
     mu, kappa, theta, xi, rho, lambda_j, mu_j, sigma_j = params
-    n_steps = int(T / dt)
+    n_steps = 4
+    dt_sim = T / n_steps
     paths = np.zeros((n_paths, n_steps + 1))
     paths[:, 0] = S0
     v = np.full(n_paths, v0)
 
     for t in range(1, n_steps + 1):
-        dW_s = np.random.normal(0, np.sqrt(dt), n_paths)
-        dW_v = rho * dW_s + np.sqrt(1 - rho ** 2) * np.random.normal(0, np.sqrt(dt), n_paths)
-        v = np.maximum(v + kappa * (theta - v) * dt + xi * np.sqrt(v) * dW_v, 0)
-        jumps = np.random.poisson(lambda_j * dt, n_paths) * np.random.normal(mu_j, sigma_j, n_paths)
-        paths[:, t] = paths[:, t - 1] * np.exp((mu - 0.5 * v) * dt + np.sqrt(v * dt) * dW_s + jumps)
+        dz_s = np.random.normal(0, 1, n_paths)
+        dz_v = np.random.normal(0, 1, n_paths)
+        market_impact = beta * market_drift * dt_sim
 
+        # Proceso de volatilidad
+        v = np.maximum(v + kappa * (theta - v) * dt_sim + xi * np.sqrt(np.maximum(v, 0)) * (
+                    rho * dz_s + np.sqrt(1 - rho ** 2) * dz_v), 1e-6)
+        # Proceso de saltos
+        jumps = np.random.poisson(max(0, lambda_j) * dt_sim, n_paths) * np.random.normal(mu_j, sigma_j, n_paths)
+
+        paths[:, t] = paths[:, t - 1] * np.exp(
+            (mu + market_impact - 0.5 * v) * dt_sim + np.sqrt(v * dt_sim) * dz_s + jumps)
     return paths
 
-# Likelihood con volumen + RSI + VIX
-def svj_log_likelihood(params, returns, dt, norm_vol, norm_rsi, norm_vix):
-    mu, kappa, theta, xi, rho, lambda_j, mu_j, sigma_j = params
-
-    mean_ret = np.mean(returns)
-    var_ret = np.var(returns)
-    skew_ret = np.mean((returns - mean_ret) ** 3) / var_ret ** 1.5 if var_ret > 0 else 0
-    kurt_ret = np.mean((returns - mean_ret) ** 4) / var_ret ** 2 - 3 if var_ret > 0 else 0
-
-    expected_mean = (mu - lambda_j * mu_j) * dt
-    expected_var = theta * dt + lambda_j * (sigma_j ** 2 + mu_j ** 2) * dt
-    expected_skew = lambda_j * (3 * sigma_j ** 2 * mu_j + mu_j ** 3) * dt / expected_var ** 1.5 if expected_var > 0 else 0
-    expected_kurt = lambda_j * (3 * sigma_j ** 4 + 6 * sigma_j ** 2 * mu_j ** 2 + mu_j ** 4) * dt / expected_var ** 2 if expected_var > 0 else 0
-
-    vol_divergence = np.mean(np.abs(norm_vol[-len(returns):]))
-    volume_penalty = vol_divergence * 0.5
-
-    rsi_extreme = np.mean(np.abs(norm_rsi[-len(returns):]))
-    rsi_penalty = rsi_extreme * 0.4
-
-    vix_divergence = np.mean(np.abs(norm_vix[-len(returns):]))
-    vix_penalty = vix_divergence * 0.2
-
-    loss = ((mean_ret - expected_mean) ** 2 + (var_ret - expected_var) ** 2 +
-            (skew_ret - expected_skew) ** 2 + (kurt_ret - expected_kurt) ** 2 +
-            volume_penalty + rsi_penalty + vix_penalty)
-
-    return loss
 
 # ======================
-# MODO REAL-TIME
+# INICIO DEL SCRIPT
 # ======================
-print(f"\n=== MODO REAL-TIME ACTIVADO ===")
-print(f"Recalibrando cada {REFIT_INTERVAL_MIN} minutos. Presiona Ctrl+C para detener.")
+print(">>> SVJ Predictor <<<", flush=True)
 
 try:
     while True:
-        current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        print(f"\n[{current_time}] Iniciando recalibración...")
+        print(f"\n[{datetime.now().strftime('%H:%M:%S')}] Actualizando mercado...", flush=True)
 
-        # Descargar datos frescos
-        df = yf.download(SYMBOL, interval=INTERVAL, period=PERIOD, progress=False)
-        if df.empty:
-            print("Error: No se descargaron datos. Esperando próxima iteración...")
-            time.sleep(REFIT_INTERVAL_MIN * 60)
+        # Descargas
+        raw_stock = yf.download(SYMBOL, interval=INTERVAL, period=PERIOD, progress=False)
+        raw_market = yf.download(MARKET_REF, interval=INTERVAL, period=PERIOD, progress=False)
+
+        closes_stock = clean_series(raw_stock['Close'])
+        closes_market = clean_series(raw_market['Close'])
+
+        if len(closes_stock) < 50:
+            print("Datos insuficientes. El mercado podría estar cerrado o yfinance está fallando.", flush=True)
+            time.sleep(60)
             continue
 
-        vix_df = yf.download("^VIX", interval=INTERVAL, period=PERIOD, progress=False)
-        if vix_df.empty:
-            vix_closes = np.full(len(df), 20.0)
-        else:
-            vix_closes = vix_df['Close'].values.astype(np.float64)
-            if len(vix_closes) < len(df):
-                vix_closes = np.pad(vix_closes, (len(df) - len(vix_closes), 0), mode='edge')
+        # Análisis de retornos
+        ret_stock = np.diff(np.log(closes_stock))
+        ret_market = np.diff(np.log(closes_market))
 
-        closes = df['Close'].values.astype(np.float64)
-        volumes = df['Volume'].values.astype(np.float64)
+        # Beta y Drift
+        min_len = min(len(ret_stock), len(ret_market))
+        beta = np.cov(ret_stock[-min_len:], ret_market[-min_len:])[0][1] / (np.var(ret_market[-min_len:]) + 1e-10)
+        m_drift = np.mean(ret_market[-20:])
 
-        rsi_values = calculate_rsi(closes)
-        normalized_rsi = (rsi_values - 50) / 50
-        if len(normalized_rsi) > len(closes) - 1:
-            normalized_rsi = normalized_rsi[:len(closes)-1]
-        else:
-            pad_length = len(closes) - 1 - len(normalized_rsi)
-            normalized_rsi = np.pad(normalized_rsi, (pad_length, 0), mode='edge')
+        m2 = np.var(ret_stock[-WINDOW_SIZE:])
+        rsi_val = calculate_rsi(closes_stock)[-1]
 
-        # Rolling window: últimas 500 velas
-        window_size = 500
-        if len(closes) > window_size:
-            closes_window = closes[-window_size:]
-            volumes_window = volumes[-window_size:]
-            rsi_window = rsi_values[-window_size:]
-            vix_window = vix_closes[-window_size:]
-        else:
-            closes_window = closes
-            volumes_window = volumes
-            rsi_window = rsi_values
-            vix_window = vix_closes
+        print(f"STATS -> Price: {closes_stock[-1]:.2f} | Beta: {beta:.2f} | RSI: {rsi_val:.2f}", flush=True)
 
-        # Normalizar dentro del window
-        vol_mean = np.mean(volumes_window[-100:]) if len(volumes_window) > 100 else np.mean(volumes_window)
-        vol_std = np.std(volumes_window[-100:]) if len(volumes_window) > 100 else np.std(volumes_window)
-        normalized_vol_window = (volumes_window - vol_mean) / (vol_std + 1e-8)
+        # Calibración
+        bounds = [(-0.1, 0.1), (0.1, 3.0), (1e-4, 0.05), (0.01, 0.5), (-0.9, 0.0), (0.01, 1.0), (-0.1, 0.1),
+                  (0.01, 0.1)]
 
-        vix_mean = np.mean(vix_window[-100:]) if len(vix_window) > 100 else np.mean(vix_window)
-        vix_std = np.std(vix_window[-100:]) if len(vix_window) > 100 else np.std(vix_window)
-        normalized_vix_window = (vix_window - vix_mean) / (vix_std + 1e-8)
 
-        # Preparar log_returns del window
-        closes_array_window = np.array(closes_window)
-        log_returns_window = np.log(closes_array_window[1:] / closes_array_window[:-1])
-        normalized_rsi_window = normalized_rsi[-len(log_returns_window):]
-        normalized_vol_window = normalized_vol_window[-len(log_returns_window):]
-        normalized_vix_window = normalized_vix_window[-len(log_returns_window):]
+        def obj(p):
+            expected_var = (p[2] + p[5] * (p[6] ** 2 + p[7] ** 2)) * DT
+            return (m2 - expected_var) ** 2
 
-        # Calibrar
-        print(f"Calibrando con {len(log_returns_window)} velas recientes...")
-        result = minimize(svj_log_likelihood, initial_params,
-                          args=(log_returns_window, dt, normalized_vol_window, normalized_rsi_window, normalized_vix_window),
-                          method=OPTIMIZER_METHOD,
-                          bounds=[(-1,1), (0.1,10), (0.01,0.2), (0.01,1), (-1,1), (0.01,2), (-0.5,0.5), (0.01,0.5)])
+
+        result = differential_evolution(obj, bounds, maxiter=15, popsize=10)
 
         if result.success:
-            calibrated_params = result.x
-            print("Parámetros recalibrados:", calibrated_params)
-            print("Loss final:", result.fun)
+            p = result.x
+            S0 = closes_stock[-1]
+            paths = simulate_svj_with_beta(p, S0, m2 / DT, beta, m_drift, HORIZON_HOURS / 6.5, DT, NUM_PATHS)
 
-            # Simular
-            S0 = closes[-1]
-            v0 = np.var(log_returns_window[-100:]) if len(log_returns_window) > 100 else 0.04
-            T = HORIZON_HOURS / 6.5
-            dt_sim = T / STEPS_PER_HOUR
-            paths = simulate_svj(calibrated_params, S0, v0, T, dt_sim, NUM_PATHS)
+            # Métricas
+            p_up = np.mean(paths[:, -1] > S0)
+            target = np.mean(paths[:, -1])
 
-            final_prices = paths[:, -1]
-            p_up = np.mean(final_prices > S0)
-            p_up_1pct = np.mean(final_prices > S0 * 1.01)
-            mean_pred = np.mean(final_prices)
-            lower_bound = mean_pred * 0.99
-            upper_bound = mean_pred * 1.01
-            p_near_mean = np.mean((final_prices >= lower_bound) & (final_prices <= upper_bound))
-            ci_90_low = np.percentile(final_prices, 5)
-            ci_90_high = np.percentile(final_prices, 95)
+            print(f"PREDICCIÓN -> P(Subida): {p_up:.2%} | Objetivo 1h: ${target:.2f}", flush=True)
 
-            print(f"\nPredicciones actualizadas para próximas {HORIZON_HOURS} horas ({SYMBOL}):")
-            print(f"P(subida): {p_up:.2%}")
-            print(f"P(subida >1%): {p_up_1pct:.2%}")
-            print(f"Precio medio esperado: ${mean_pred:.2f}")
-            print(f"Probabilidad de estar dentro de ±1% del precio medio esperado: {p_near_mean:.2%}")
-            print(f"90% Intervalo de confianza: [${ci_90_low:.2f}, ${ci_90_high:.2f}]")
+            # Gráfico rápido
+            plt.clf()
+            plt.style.use('dark_background')
+            plt.plot(paths[:50].T, alpha=0.15, color='springgreen')
+            plt.axhline(S0, color='white', linestyle='--', label='Actual')
+            plt.title(f"{SYMBOL} Proyección - Prob: {p_up:.1%}")
+            plt.draw()
+            plt.pause(0.001)
 
-            # Gráfico actualizado cada recalibración
-            plt.figure(figsize=(10,6))
-            plt.plot(paths[:100].T, alpha=0.6, linewidth=0.8)
-            plt.axhline(S0, color='red', linestyle='--', label=f'Precio actual: ${S0.item():.2f}')
-            plt.title(f'SVJ + Volumen + RSI + VIX ({current_time}) - Próximas {HORIZON_HOURS} horas ({SYMBOL})')
-            plt.xlabel('Pasos (15 min)')
-            plt.ylabel('Precio')
-            plt.legend()
-            plt.grid(True, alpha=0.3)
-            plt.show()
-            plt.close()  # Cierra la ventana para no acumular gráficos
-        else:
-            print("No se pudo recalibrar. Usando parámetros anteriores.")
-
-        print(f"Esperando {REFIT_INTERVAL_MIN} minutos para próxima actualización...\n")
+        print(f"Próxima actualización en {REFIT_INTERVAL_MIN} min...", flush=True)
         time.sleep(REFIT_INTERVAL_MIN * 60)
 
 except KeyboardInterrupt:
-    print("\nReal-time detenido por el usuario. ¡Hasta la próxima!")
+    print("\nCerrando sistema...")
 except Exception as e:
-    print(f"Error inesperado en real-time: {e}")
+    print(f"\nERROR CRÍTICO: {e}", flush=True)
+    import traceback
+
+    traceback.print_exc()
