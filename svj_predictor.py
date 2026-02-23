@@ -5,7 +5,7 @@ import numpy as np
 import pandas as pd
 from scipy.optimize import differential_evolution
 import matplotlib.pyplot as plt
-np.random.seed(42)
+
 
 SYMBOL = "PLTR"
 MARKET_REF = "^GSPC"
@@ -16,6 +16,9 @@ HORIZON_HOURS = 1
 WINDOW_SIZE = 400
 REFIT_INTERVAL_MIN = 15
 DT = 15 / (60 * 6.5)
+
+#Semilla para evitar saltos
+np.random.seed(42)
 
 plt.ion()
 
@@ -69,7 +72,7 @@ def simulate_svj_with_beta(params, S0, v0, beta, market_drift, T, dt, n_paths):
 # ======================
 # BUCLE PRINCIPAL
 # ======================
-print(f">>> SISTEMA SVJ V3.3: MODO TRADING {SYMBOL} <<<", flush=True)
+print(f">>>MODO TRADING {SYMBOL} <<<", flush=True)
 
 try:
     while True:
@@ -113,11 +116,42 @@ try:
             p = result.x
 
             # --- NUEVO: CÁLCULO SCI 100% ---
-            error_factor = np.exp(-result.fun * 100)
-            param_stability = 1.0 if (0.1 < p[1] < 10 and p[3] < 1.0) else 0.5
-            market_context = 1.0 if (20 < rsi_val < 80) else 0.6
+            try:
+                # 1. Ajuste matemático (max 40%)
+                error_val = float(result.fun)
+                error_score = max(0, 40 * (1 - np.sqrt(error_val / 0.01)))
 
-            confidence_index = (0.4 * error_factor + 0.3 * param_stability + 0.3 * market_context) * 100
+                # 2. Factor de Actividad Real (max 30%)
+                # Verificamos si la última vela es de hace más de 30 minutos
+                last_candle_time = raw_stock.index[-1]
+                now = datetime.now(last_candle_time.tz)  # Sincronizamos zona horaria
+                time_diff = (now - last_candle_time).total_seconds() / 60
+
+                # Si el dato es de hace más de 20 min, el mercado está cerrado o congelado
+                if time_diff > 20:
+                    activity_multiplier = 0.1  # Penalización masiva por dato viejo
+                else:
+                    activity_multiplier = 1.0
+
+                market_activity_score = 30 * activity_multiplier
+
+                # 3. Estabilidad RSI (max 30%)
+                rsi_score = 30 if (35 < rsi_val < 65) else 15
+
+                # Cálculo base
+                confidence_index = error_score + market_activity_score + rsi_score
+
+                # --- EL FILTRO DEFINITIVO ---
+                # Si el mercado está cerrado (ahora mismo), CAPEAMOS el resultado al 40%
+                if time_diff > 20:
+                    confidence_index = min(confidence_index, 40.0)
+                    status_extra = "DATOS VIEJOS"
+                else:
+                    status_extra = "VIVO"
+
+            except Exception as e:
+                confidence_index = 10.0
+                status_extra = "ERROR_CHECK"
             # -------------------------------
 
             S0 = closes_stock[-1]
