@@ -45,6 +45,16 @@ L-BFGS-B.
 Se noto que penalizaciones directas: loss =(...) + volume_penalty + rsi_penalty
 confunde al optimizador al mezclar unidades distintas.
 
-### Deteccion de Regimenes
+### Deteccion de Regimenes 
 Filtro de Kalman o HMM, se agregara una logica de deteccion de cambio de regimen.
+
+## Health Check
+
+Rango SCI
+
+85-100% Senal fuerte
+60-84% Sennal normal
+40-59% Riesgo Alto
+<40 Basura, no confies en resultados.
+
 
